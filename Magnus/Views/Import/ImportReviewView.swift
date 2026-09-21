@@ -36,7 +36,7 @@ struct ImportReviewView: View {
                     Text("Nessun esercizio riconosciuto: aggiungili a mano oppure riprova con una foto più nitida.")
                         .foregroundStyle(Theme.red)
                 } else {
-                    Text("Riconosciuti \(totalExercises) esercizi. Il recupero è quello scritto sulla scheda e resterà fisso.")
+                    Text("Riconosciuti \(totalExercises) esercizi in \(days.count) giorni. Controlla nomi, serie, recuperi e gruppo muscolare: il recupero resterà fisso durante l'allenamento.")
                 }
             }
             .listRowBackground(Theme.surface)
@@ -54,7 +54,7 @@ struct ImportReviewView: View {
                     }
 
                     Button {
-                        $day.exercises.wrappedValue.append(ParsedExercise(name: "", sets: 3, reps: "10", restTime: ""))
+                        $day.exercises.wrappedValue.append(ParsedExercise(name: "", sets: 3, reps: "10", restTime: "", muscleGroup: .altro))
                     } label: {
                         Label("Aggiungi esercizio", systemImage: "plus.circle.fill")
                     }
@@ -79,8 +79,7 @@ struct ImportReviewView: View {
 
             Section {
                 Button {
-                    let letter = Character(UnicodeScalar(65 + min(days.count, 25))!)
-                    days.append(ParsedDay(name: "Giorno \(letter)", exercises: []))
+                    days.append(ParsedDay(name: PlanOCRService.dayName(at: days.count), exercises: []))
                 } label: {
                     Label("Aggiungi giorno", systemImage: "calendar.badge.plus")
                 }
@@ -93,7 +92,7 @@ struct ImportReviewView: View {
                     }
                     if showRawText {
                         ForEach(Array(rawRows.enumerated()), id: \.offset) { _, row in
-                            Text(row)
+                            Text(row.isEmpty ? "— (riga vuota)" : row)
                                 .font(.caption.monospaced())
                                 .foregroundStyle(Theme.textSecondary)
                         }
@@ -129,7 +128,7 @@ struct ImportReviewView: View {
         modelContext.insert(plan)
 
         for (dayIndex, parsedDay) in days.enumerated() {
-            let day = WorkoutDay(name: parsedDay.name.isEmpty ? "Giorno \(dayIndex + 1)" : parsedDay.name, order: dayIndex)
+            let day = WorkoutDay(name: parsedDay.name.isEmpty ? PlanOCRService.dayName(at: dayIndex) : parsedDay.name, order: dayIndex)
             modelContext.insert(day)
             day.plan = plan
 
@@ -140,7 +139,9 @@ struct ImportReviewView: View {
                     order: exerciseIndex,
                     sets: max(1, parsed.sets),
                     reps: parsed.reps.isEmpty ? "10" : parsed.reps,
-                    restTime: parsed.restTime
+                    restTime: parsed.isTimed ? "" : parsed.restTime,
+                    muscleGroup: parsed.muscleGroup,
+                    durationMinutes: parsed.durationMinutes
                 )
                 modelContext.insert(exercise)
                 exercise.day = day
@@ -155,46 +156,104 @@ struct ImportReviewView: View {
 struct ParsedExerciseRow: View {
     @Binding var exercise: ParsedExercise
 
+    private var isTimed: Binding<Bool> {
+        Binding(
+            get: { exercise.durationMinutes != nil },
+            set: { exercise.durationMinutes = $0 ? (exercise.durationMinutes ?? 10) : nil }
+        )
+    }
+
+    private var minutes: Binding<Int> {
+        Binding(
+            get: { exercise.durationMinutes ?? 10 },
+            set: { exercise.durationMinutes = $0 }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Nome esercizio", text: $exercise.name)
                 .font(.body.weight(.semibold))
+                .onChange(of: exercise.name) { _, newValue in
+                    if !exercise.groupWasEdited {
+                        exercise.muscleGroup = MuscleGroup.classify(newValue)
+                    }
+                }
 
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
+                MuscleGroupMenu(selection: $exercise.muscleGroup) {
+                    exercise.groupWasEdited = true
+                }
+                Spacer()
+                Toggle("A tempo", isOn: isTimed)
+                    .font(.caption)
+                    .toggleStyle(.switch)
+                    .tint(Theme.red)
+                    .fixedSize()
+            }
+
+            if exercise.isTimed {
+                Stepper(value: minutes, in: 1...180) {
+                    Label("\(exercise.durationMinutes ?? 10) min", systemImage: "timer")
+                        .font(.subheadline)
+                }
+            } else {
                 Stepper(value: $exercise.sets, in: 1...12) {
                     Text("\(exercise.sets) serie")
                         .font(.subheadline)
                 }
-                .fixedSize()
 
-                Spacer()
-            }
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        Text("×")
+                            .foregroundStyle(Theme.textSecondary)
+                        TextField("10", text: $exercise.reps)
+                            .frame(width: 60)
+                        Text("rip.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
 
-            HStack(spacing: 12) {
-                HStack(spacing: 4) {
-                    Text("×")
-                        .foregroundStyle(Theme.textSecondary)
-                    TextField("10", text: $exercise.reps)
-                        .frame(width: 60)
-                    Text("rip.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
+                    Divider()
+
+                    HStack(spacing: 4) {
+                        Image(systemName: "lock.fill")
+                            .foregroundStyle(Theme.textSecondary)
+                        TextField("50''", text: $exercise.restTime)
+                            .frame(width: 70)
+                        Text("recupero")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
                 }
-
-                Divider()
-
-                HStack(spacing: 4) {
-                    Image(systemName: "timer")
-                        .foregroundStyle(Theme.textSecondary)
-                    TextField("90''", text: $exercise.restTime)
-                        .frame(width: 70)
-                    Text("recupero")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                }
+                .font(.subheadline)
             }
-            .font(.subheadline)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Menu a tendina per scegliere il gruppo muscolare.
+struct MuscleGroupMenu: View {
+    @Binding var selection: MuscleGroup
+    var onChange: () -> Void = {}
+
+    var body: some View {
+        Menu {
+            ForEach(MuscleGroup.allCases) { group in
+                Button {
+                    selection = group
+                    onChange()
+                } label: {
+                    if group == selection {
+                        Label(group.label, systemImage: "checkmark")
+                    } else {
+                        Label(group.label, systemImage: group.icon)
+                    }
+                }
+            }
+        } label: {
+            Chip(text: selection.label, systemImage: selection.icon, style: .navy)
+        }
     }
 }

@@ -5,6 +5,7 @@ import SwiftData
 struct PlanView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \WorkoutPlan.createdAt, order: .reverse) private var plans: [WorkoutPlan]
+    @Query(filter: #Predicate<SetLog> { $0.completed }) private var completedLogs: [SetLog]
 
     @State private var showImport = false
     @State private var showPlanList = false
@@ -18,6 +19,10 @@ struct PlanView: View {
 
     private var activePlan: WorkoutPlan? {
         plans.first { $0.isActive } ?? plans.first
+    }
+
+    private var history: ExerciseHistory {
+        ExerciseHistory(logs: completedLogs)
     }
 
     var body: some View {
@@ -122,7 +127,7 @@ struct PlanView: View {
                         NavigationLink {
                             ExerciseEditorView(exercise: exercise)
                         } label: {
-                            ExerciseRow(exercise: exercise)
+                            ExerciseRow(exercise: exercise, history: history)
                         }
                     }
                     .onDelete { offsets in
@@ -200,12 +205,12 @@ struct PlanView: View {
             Button("Annulla", role: .cancel) {}
         }
         .confirmationDialog("Eliminare la scheda?", isPresented: $showDeletePlanConfirm, titleVisibility: .visible) {
-            Button("Elimina scheda e storico", role: .destructive) {
+            Button("Elimina scheda", role: .destructive) {
                 deletePlan(plan)
             }
             Button("Annulla", role: .cancel) {}
         } message: {
-            Text("Verranno eliminati anche gli allenamenti registrati con questa scheda.")
+            Text("Gli allenamenti già registrati restano nello storico e nei grafici.")
         }
     }
 
@@ -310,21 +315,25 @@ struct PlanHeaderCard: View {
 
 struct ExerciseRow: View {
     let exercise: Exercise
+    let history: ExerciseHistory
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(exercise.name)
                 .font(.body.weight(.semibold))
-            HStack(spacing: 6) {
-                Chip(text: exercise.setsRepsLabel, style: .navy)
-                if !exercise.restTime.isEmpty {
-                    Chip(text: exercise.restTime, systemImage: "lock.fill", style: .neutral)
-                }
-                if let target = exercise.targetWeight {
-                    Chip(text: "→ \(target.kgString) kg", systemImage: "target", style: .red)
-                }
-                if let pr = exercise.personalRecord() {
-                    Chip(text: "max \(pr.kgString) kg", systemImage: "trophy.fill", style: .success)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    Chip(text: exercise.scheduleLabel, style: .navy)
+                    Chip(text: exercise.muscleGroup.label, systemImage: exercise.muscleGroup.icon, style: .neutral)
+                    if !exercise.isTimed && !exercise.restTime.isEmpty {
+                        Chip(text: exercise.restTime, systemImage: "lock.fill", style: .neutral)
+                    }
+                    if let target = exercise.targetWeight {
+                        Chip(text: "→ \(target.kgString) kg", systemImage: "target", style: .red)
+                    }
+                    if let pr = history.personalRecord(for: exercise) {
+                        Chip(text: "max \(pr.kgString) kg", systemImage: "trophy.fill", style: .success)
+                    }
                 }
             }
         }

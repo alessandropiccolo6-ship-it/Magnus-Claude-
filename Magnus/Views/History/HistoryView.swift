@@ -1,10 +1,12 @@
 import SwiftUI
 import SwiftData
 
-/// Tab "Storico": tutti gli allenamenti registrati, mese per mese.
+/// Tab "Storico": tutti gli allenamenti registrati, mese per mese,
+/// filtrabili per gruppo muscolare (così restano confrontabili tra schede diverse).
 struct HistoryView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \WorkoutSession.date, order: .reverse) private var sessions: [WorkoutSession]
+    @State private var filterGroup: MuscleGroup?
 
     private struct MonthGroup: Identifiable {
         let id: String
@@ -12,10 +14,17 @@ struct HistoryView: View {
         let sessions: [WorkoutSession]
     }
 
+    private var filtered: [WorkoutSession] {
+        sessions.filter { session in
+            guard session.isFinished else { return false }
+            guard let filterGroup else { return true }
+            return session.muscleGroups.contains(filterGroup)
+        }
+    }
+
     private var groups: [MonthGroup] {
-        let finished = sessions.filter(\.isFinished)
         let calendar = Calendar.current
-        let grouped = Dictionary(grouping: finished) { session -> String in
+        let grouped = Dictionary(grouping: filtered) { session -> String in
             let components = calendar.dateComponents([.year, .month], from: session.date)
             return "\(components.year ?? 0)-\(components.month ?? 0)"
         }
@@ -36,7 +45,7 @@ struct HistoryView: View {
                         Image(systemName: "calendar.badge.clock")
                             .font(.system(size: 48))
                             .foregroundStyle(Theme.red)
-                        Text("Ancora nessun allenamento")
+                        Text(filterGroup == nil ? "Ancora nessun allenamento" : "Nessun allenamento per \(filterGroup?.label ?? "")")
                             .font(.title3.weight(.semibold))
                         Text("Gli allenamenti terminati compariranno qui.")
                             .font(.subheadline)
@@ -67,6 +76,34 @@ struct HistoryView: View {
             }
             .screenBackground()
             .navigationTitle("Storico")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Button {
+                            filterGroup = nil
+                        } label: {
+                            if filterGroup == nil {
+                                Label("Tutti", systemImage: "checkmark")
+                            } else {
+                                Text("Tutti")
+                            }
+                        }
+                        ForEach(MuscleGroup.allCases) { group in
+                            Button {
+                                filterGroup = group
+                            } label: {
+                                if filterGroup == group {
+                                    Label(group.label, systemImage: "checkmark")
+                                } else {
+                                    Label(group.label, systemImage: group.icon)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(filterGroup?.label ?? "Filtra", systemImage: "line.3.horizontal.decrease.circle")
+                    }
+                }
+            }
         }
     }
 }
@@ -92,6 +129,13 @@ struct SessionRow: View {
                 Text("\(session.completedSets.count) serie · \(session.totalVolume.kgString) kg sollevati")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
+                let groups = session.muscleGroups
+                if !groups.isEmpty {
+                    Text(groups.prefix(5).map(\.label).joined(separator: " · "))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.red)
+                        .lineLimit(1)
+                }
             }
             Spacer()
         }
@@ -126,16 +170,33 @@ struct SessionDetailView: View {
             }
             .listRowBackground(Theme.surface)
 
-            ForEach(Array(session.completedSetsByExercise.enumerated()), id: \.offset) { _, group in
-                Section(group.name) {
-                    ForEach(group.logs) { log in
+            ForEach(session.completedSetsByExercise) { group in
+                Section {
+                    if group.isTimed {
                         HStack {
-                            Text("Serie \(log.setIndex)")
+                            Label("Durata", systemImage: "timer")
                                 .foregroundStyle(Theme.textSecondary)
                             Spacer()
-                            Text("\(log.weight.kgString) kg × \(log.reps)")
+                            Text("\(group.logs.first?.reps ?? 0) min")
                                 .font(.body.weight(.semibold))
                         }
+                    } else {
+                        ForEach(group.logs) { log in
+                            HStack {
+                                Text("Serie \(log.setIndex)")
+                                    .foregroundStyle(Theme.textSecondary)
+                                Spacer()
+                                Text("\(log.weight.kgString) kg × \(log.reps)")
+                                    .font(.body.weight(.semibold))
+                            }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text(group.name)
+                        Spacer()
+                        Text(group.group.label)
+                            .foregroundStyle(Theme.red)
                     }
                 }
                 .listRowBackground(Theme.surface)

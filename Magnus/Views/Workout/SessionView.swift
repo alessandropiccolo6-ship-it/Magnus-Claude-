@@ -13,6 +13,7 @@ struct SessionView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Bindable var session: WorkoutSession
+    @Query(filter: #Predicate<SetLog> { $0.completed }) private var completedLogs: [SetLog]
 
     @State private var restTimer: RestTimerRequest?
     @State private var showFinishConfirm = false
@@ -22,11 +23,15 @@ struct SessionView: View {
         session.day?.sortedExercises ?? []
     }
 
+    private var history: ExerciseHistory {
+        ExerciseHistory(logs: completedLogs)
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 16) {
                 ForEach(exercises) { exercise in
-                    ExerciseLogCard(exercise: exercise, session: session) { seconds in
+                    ExerciseLogCard(exercise: exercise, session: session, history: history) { seconds in
                         restTimer = RestTimerRequest(seconds: seconds, exerciseName: exercise.name)
                     }
                 }
@@ -91,14 +96,24 @@ struct SessionView: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
-    /// Crea in anticipo una riga per ogni serie prevista, precompilata con i pesi dell'ultima volta.
+    /// Crea in anticipo una riga per ogni serie prevista, precompilata con i pesi
+    /// dell'ultima volta (anche se erano su una scheda precedente).
     private func ensureLogs() {
+        let history = self.history
         for exercise in exercises {
             let existing = session.logs(for: exercise)
+            if exercise.isTimed {
+                guard existing.isEmpty else { continue }
+                let log = SetLog(snapshotOf: exercise, setIndex: 1, weight: 0, reps: exercise.durationMinutes ?? 0, date: session.date)
+                modelContext.insert(log)
+                log.exercise = exercise
+                log.session = session
+                continue
+            }
             let count = max(exercise.sets, 1)
             for index in 1...count where !existing.contains(where: { $0.setIndex == index }) {
-                let weight = exercise.lastWeight(forSet: index, excluding: session) ?? 0
-                let log = SetLog(setIndex: index, weight: weight, reps: exercise.defaultReps, completed: false, date: session.date)
+                let weight = history.lastWeight(forSet: index, for: exercise, excluding: session) ?? 0
+                let log = SetLog(snapshotOf: exercise, setIndex: index, weight: weight, reps: exercise.defaultReps, date: session.date)
                 modelContext.insert(log)
                 log.exercise = exercise
                 log.session = session
@@ -114,6 +129,7 @@ struct SessionView: View {
             for log in session.sets where !log.completed {
                 modelContext.delete(log)
             }
+            session.dayNameSnapshot = session.dayName
             session.finishedAt = .now
         }
         dismiss()
@@ -122,18 +138,19 @@ struct SessionView: View {
 
 /// Scheda di un esercizio durante l'allenamento.
 struct ExerciseLogCard: View {
-    @Environment(\.modelContext) private var modelContext
     let exercise: Exercise
     let session: WorkoutSession
+    let history: ExerciseHistory
     var onStartRest: (Int) -> Void
 
     @State private var showTargetAlert = false
     @State private var targetText = ""
 
     private var logs: [SetLog] { session.logs(for: exercise) }
-    private var previousRecord: Double? { exercise.personalRecord(excluding: session) }
+    private var previousRecord: Double? { history.personalRecord(for: exercise, excluding: session) }
 
     private var isNewRecord: Bool {
+        guard !exercise.isTimed else { return false }
         let completed = logs.filter(\.completed)
         guard let best = completed.map(\.weight).max(), best > 0 else { return false }
         if let previousRecord { return best > previousRecord }
@@ -144,13 +161,13 @@ struct ExerciseLogCard: View {
         VStack(alignment: .leading, spacing: 12) {
             header
 
-            if let summary = exercise.lastSessionSummary(excluding: session) {
+            if !exercise.isTimed, let summary = history.lastSessionSummary(for: exercise, excluding: session) {
                 Label(summary, systemImage: "clock.arrow.circlepath")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
             }
 
-            if let suggestion = exercise.suggestedNextWeight(excluding: session) {
+            if !exercise.isTimed, let suggestion = history.suggestedNextWeight(for: exercise, excluding: session) {
                 Label("Pronto ad aumentare: prova \(suggestion.kgString) kg", systemImage: "arrow.up.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.red)
@@ -164,19 +181,25 @@ struct ExerciseLogCard: View {
 
             Divider().overlay(Color.white.opacity(0.1))
 
-            HStack {
-                Text("Serie").frame(width: 36, alignment: .leading)
-                Text("Kg").frame(maxWidth: .infinity)
-                Text("Rip.").frame(width: 60)
-                Text("Fatta").frame(width: 44)
-            }
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(Theme.textSecondary)
+            if exercise.isTimed {
+                ForEach(logs) { log in
+                    TimedRow(log: log)
+                }
+            } else {
+                HStack {
+                    Text("Serie").frame(width: 36, alignment: .leading)
+                    Text("Kg").frame(maxWidth: .infinity)
+                    Text("Rip.").frame(width: 60)
+                    Text("Fatta").frame(width: 44)
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
 
-            ForEach(logs) { log in
-                SetRow(log: log) {
-                    if let seconds = exercise.restSeconds, seconds > 0 {
-                        onStartRest(seconds)
+                ForEach(logs) { log in
+                    SetRow(log: log) {
+                        if let seconds = exercise.restSeconds, seconds > 0 {
+                            onStartRest(seconds)
+                        }
                     }
                 }
             }
@@ -204,30 +227,33 @@ struct ExerciseLogCard: View {
                 Text(exercise.name)
                     .font(.headline)
                 HStack(spacing: 6) {
-                    Chip(text: exercise.setsRepsLabel, style: .navy)
+                    Chip(text: exercise.scheduleLabel, style: .navy)
+                    Chip(text: exercise.muscleGroup.label, systemImage: exercise.muscleGroup.icon, style: .neutral)
 
-                    if let seconds = exercise.restSeconds, seconds > 0 {
+                    if !exercise.isTimed {
+                        if let seconds = exercise.restSeconds, seconds > 0 {
+                            Button {
+                                onStartRest(seconds)
+                            } label: {
+                                Chip(text: exercise.restTime, systemImage: "timer", style: .neutral)
+                            }
+                            .buttonStyle(.plain)
+                        } else if !exercise.restTime.isEmpty {
+                            Chip(text: exercise.restTime, systemImage: "lock.fill", style: .neutral)
+                        }
+
                         Button {
-                            onStartRest(seconds)
+                            targetText = exercise.targetWeight.map { $0.kgString } ?? ""
+                            showTargetAlert = true
                         } label: {
-                            Chip(text: exercise.restTime, systemImage: "timer", style: .neutral)
+                            if let target = exercise.targetWeight {
+                                Chip(text: "→ \(target.kgString) kg", systemImage: "target", style: .red)
+                            } else {
+                                Chip(text: "Obiettivo", systemImage: "target", style: .neutral)
+                            }
                         }
                         .buttonStyle(.plain)
-                    } else if !exercise.restTime.isEmpty {
-                        Chip(text: exercise.restTime, systemImage: "lock.fill", style: .neutral)
                     }
-
-                    Button {
-                        targetText = exercise.targetWeight.map { $0.kgString } ?? ""
-                        showTargetAlert = true
-                    } label: {
-                        if let target = exercise.targetWeight {
-                            Chip(text: "→ \(target.kgString) kg", systemImage: "target", style: .red)
-                        } else {
-                            Chip(text: "Obiettivo", systemImage: "target", style: .neutral)
-                        }
-                    }
-                    .buttonStyle(.plain)
                 }
             }
             Spacer()
@@ -287,22 +313,10 @@ struct SetRow: View {
                 .background(Theme.surfaceElevated, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .frame(width: 60)
 
-            Button {
-                withAnimation(.snappy) {
-                    log.completed.toggle()
-                }
-                if log.completed {
-                    log.date = .now
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    onCompleted()
-                }
-            } label: {
-                Image(systemName: log.completed ? "checkmark.circle.fill" : "circle")
-                    .font(.title2)
-                    .foregroundStyle(log.completed ? Theme.success : Theme.textSecondary)
+            CompletionButton(completed: $log.completed) {
+                log.date = .now
+                onCompleted()
             }
-            .buttonStyle(.plain)
-            .frame(width: 44)
         }
     }
 
@@ -315,5 +329,54 @@ struct SetRow: View {
                 .foregroundStyle(.white)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Riga di un esercizio a tempo (riscaldamento, corsa, cyclette): minuti + fatto.
+struct TimedRow: View {
+    @Bindable var log: SetLog
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Label("Durata", systemImage: "timer")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
+            Spacer()
+            TextField("min", value: $log.reps, format: .number)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.center)
+                .padding(.vertical, 6)
+                .background(Theme.surfaceElevated, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(width: 70)
+            Text("min")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
+            CompletionButton(completed: $log.completed) {
+                log.date = .now
+            }
+        }
+    }
+}
+
+struct CompletionButton: View {
+    @Binding var completed: Bool
+    var onCompleted: () -> Void
+
+    var body: some View {
+        Button {
+            withAnimation(.snappy) {
+                completed.toggle()
+            }
+            if completed {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                onCompleted()
+            }
+        } label: {
+            Image(systemName: completed ? "checkmark.circle.fill" : "circle")
+                .font(.title2)
+                .foregroundStyle(completed ? Theme.success : Theme.textSecondary)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 44)
     }
 }

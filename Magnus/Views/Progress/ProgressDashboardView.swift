@@ -2,12 +2,15 @@ import SwiftUI
 import SwiftData
 import Charts
 
-/// Tab "Progressi": statistiche, calendario e grafici per esercizio.
+/// Tab "Progressi": statistiche, calendario, gruppi muscolari e grafici per esercizio.
+/// I dati sono uniti tra tutte le schede: per nome esercizio e per gruppo muscolare.
 struct ProgressDashboardView: View {
     @Query(sort: \WorkoutSession.date) private var sessions: [WorkoutSession]
     @Query(sort: \WorkoutPlan.createdAt, order: .reverse) private var plans: [WorkoutPlan]
+    @Query(filter: #Predicate<SetLog> { $0.completed }) private var completedLogs: [SetLog]
 
-    @State private var selectedExerciseID: PersistentIdentifier?
+    @State private var selectedSeriesID: String?
+    @State private var selectedGroup: MuscleGroup?
     @State private var metric: ChartMetric = .maxWeight
 
     enum ChartMetric: String, CaseIterable, Identifiable {
@@ -24,15 +27,24 @@ struct ProgressDashboardView: View {
         plans.first { $0.isActive } ?? plans.first
     }
 
-    private var planExercises: [Exercise] {
-        activePlan?.sortedDays.flatMap(\.sortedExercises) ?? []
+    private var history: ExerciseHistory {
+        ExerciseHistory(logs: completedLogs)
     }
 
-    private var selectedExercise: Exercise? {
-        if let selectedExerciseID, let match = planExercises.first(where: { $0.persistentModelID == selectedExerciseID }) {
+    private var allSeries: [ExerciseSeries] {
+        history.series(including: activePlan?.allExercises ?? [])
+    }
+
+    private var selectedSeries: ExerciseSeries? {
+        if let selectedSeriesID, let match = allSeries.first(where: { $0.id == selectedSeriesID }) {
             return match
         }
-        return planExercises.first { !$0.completedLogs().isEmpty } ?? planExercises.first
+        return allSeries.first { !$0.points.isEmpty } ?? allSeries.first
+    }
+
+    /// Obiettivo dell'esercizio nella scheda attiva con lo stesso nome.
+    private func target(for series: ExerciseSeries) -> Double? {
+        activePlan?.allExercises.first { $0.normalizedName == series.id }?.targetWeight
     }
 
     var body: some View {
@@ -42,8 +54,14 @@ struct ProgressDashboardView: View {
                     StatsGrid(sessions: finished)
                     CalendarHeatmap(sessions: finished)
                     WeeklyWorkoutsChart(sessions: finished)
+                    MuscleGroupCard(
+                        history: history,
+                        series: allSeries,
+                        selectedGroup: $selectedGroup,
+                        onSelectSeries: { selectedSeriesID = $0.id }
+                    )
                     exerciseChartCard
-                    TargetsCard(exercises: planExercises)
+                    TargetsCard(exercises: activePlan?.allExercises ?? [], history: history)
                 }
                 .padding()
             }
@@ -69,22 +87,25 @@ struct ProgressDashboardView: View {
                 .frame(width: 170)
             }
 
-            if planExercises.isEmpty {
-                Text("Crea una scheda per vedere i grafici.")
+            if allSeries.isEmpty {
+                Text("Crea una scheda e registra un allenamento per vedere i grafici.")
                     .font(.subheadline)
                     .foregroundStyle(Theme.textSecondary)
             } else {
                 Menu {
-                    ForEach(activePlan?.sortedDays ?? []) { day in
-                        Section(day.name) {
-                            ForEach(day.sortedExercises) { exercise in
-                                Button {
-                                    selectedExerciseID = exercise.persistentModelID
-                                } label: {
-                                    if exercise.persistentModelID == selectedExercise?.persistentModelID {
-                                        Label(exercise.name, systemImage: "checkmark")
-                                    } else {
-                                        Text(exercise.name)
+                    ForEach(MuscleGroup.allCases) { group in
+                        let items = allSeries.filter { $0.group == group }
+                        if !items.isEmpty {
+                            Section(group.label) {
+                                ForEach(items) { series in
+                                    Button {
+                                        selectedSeriesID = series.id
+                                    } label: {
+                                        if series.id == selectedSeries?.id {
+                                            Label(series.name, systemImage: "checkmark")
+                                        } else {
+                                            Text(series.name)
+                                        }
                                     }
                                 }
                             }
@@ -92,9 +113,16 @@ struct ProgressDashboardView: View {
                     }
                 } label: {
                     HStack {
-                        Text(selectedExercise?.name ?? "Scegli esercizio")
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(Theme.textPrimary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(selectedSeries?.name ?? "Scegli esercizio")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(Theme.textPrimary)
+                            if let selectedSeries {
+                                Text("\(selectedSeries.group.label) · \(selectedSeries.sessionsCount) allenamenti")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                        }
                         Spacer()
                         Image(systemName: "chevron.up.chevron.down")
                             .foregroundStyle(Theme.textSecondary)
@@ -103,8 +131,8 @@ struct ProgressDashboardView: View {
                     .background(Theme.surfaceElevated, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
 
-                if let exercise = selectedExercise {
-                    ExerciseProgressChart(exercise: exercise, metric: metric)
+                if let series = selectedSeries {
+                    ExerciseProgressChart(series: series, target: target(for: series), metric: metric)
                 }
             }
         }
@@ -283,18 +311,13 @@ struct CalendarHeatmap: View {
 struct WeeklyWorkoutsChart: View {
     let sessions: [WorkoutSession]
 
-    private struct WeekBucket: Identifiable {
-        let id: Date
-        let count: Int
-    }
-
     private var buckets: [WeekBucket] {
         let calendar = Calendar.current
         guard let thisWeek = calendar.dateInterval(of: .weekOfYear, for: .now)?.start else { return [] }
-        return (0..<8).reversed().compactMap { offset in
+        return (0..<8).reversed().compactMap { offset -> WeekBucket? in
             guard let start = calendar.date(byAdding: .weekOfYear, value: -offset, to: thisWeek) else { return nil }
             let count = sessions.filter { calendar.isDate($0.date, equalTo: start, toGranularity: .weekOfYear) }.count
-            return WeekBucket(id: start, count: count)
+            return WeekBucket(id: start, value: Double(count))
         }
     }
 
@@ -306,7 +329,7 @@ struct WeeklyWorkoutsChart: View {
             Chart(buckets) { bucket in
                 BarMark(
                     x: .value("Settimana", bucket.id, unit: .weekOfYear),
-                    y: .value("Allenamenti", bucket.count)
+                    y: .value("Allenamenti", bucket.value)
                 )
                 .foregroundStyle(Theme.navyGradient)
                 .cornerRadius(4)
@@ -329,13 +352,141 @@ struct WeeklyWorkoutsChart: View {
     }
 }
 
+// MARK: - Gruppi muscolari
+
+/// Confronto per gruppo muscolare: funziona anche quando la scheda cambia,
+/// perché ogni serie registrata ricorda il proprio gruppo.
+struct MuscleGroupCard: View {
+    let history: ExerciseHistory
+    let series: [ExerciseSeries]
+    @Binding var selectedGroup: MuscleGroup?
+    var onSelectSeries: (ExerciseSeries) -> Void
+
+    private var groups: [MuscleGroup] {
+        let withData = history.groupsWithData
+        let fromPlan = MuscleGroup.allCases.filter { group in series.contains { $0.group == group } }
+        return MuscleGroup.allCases.filter { withData.contains($0) || fromPlan.contains($0) }
+    }
+
+    private var effectiveGroup: MuscleGroup? {
+        if let selectedGroup, groups.contains(selectedGroup) { return selectedGroup }
+        return groups.first
+    }
+
+    private var groupSeries: [ExerciseSeries] {
+        guard let effectiveGroup else { return [] }
+        return series
+            .filter { $0.group == effectiveGroup }
+            .sorted { ($0.points.last?.date ?? .distantPast) > ($1.points.last?.date ?? .distantPast) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Gruppi muscolari")
+                .font(.headline)
+
+            if groups.isEmpty {
+                Text("Registra un allenamento per vedere il confronto per gruppo muscolare.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(groups) { group in
+                            Button {
+                                selectedGroup = group
+                            } label: {
+                                Chip(
+                                    text: group.label,
+                                    systemImage: group.icon,
+                                    style: group == effectiveGroup ? .red : .neutral
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                if let effectiveGroup {
+                    let buckets = history.weeklyVolume(for: effectiveGroup)
+                    if buckets.contains(where: { $0.value > 0 }) {
+                        Text("Volume settimanale (kg × ripetizioni)")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                        Chart(buckets) { bucket in
+                            BarMark(
+                                x: .value("Settimana", bucket.id, unit: .weekOfYear),
+                                y: .value("Volume", bucket.value)
+                            )
+                            .foregroundStyle(Theme.redGradient)
+                            .cornerRadius(4)
+                        }
+                        .chartXAxis {
+                            AxisMarks(values: .stride(by: .weekOfYear)) { _ in
+                                AxisValueLabel(format: .dateTime.day().month(.abbreviated), centered: true)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                        }
+                        .chartYAxis {
+                            AxisMarks(position: .leading) { _ in
+                                AxisGridLine().foregroundStyle(Color.white.opacity(0.08))
+                                AxisValueLabel().foregroundStyle(Theme.textSecondary)
+                            }
+                        }
+                        .frame(height: 120)
+                    }
+
+                    ForEach(groupSeries) { item in
+                        Button {
+                            onSelectSeries(item)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Theme.textPrimary)
+                                    Text(item.points.isEmpty ? "Nessun dato" : "\(item.sessionsCount) allenamenti")
+                                        .font(.caption2)
+                                        .foregroundStyle(Theme.textSecondary)
+                                }
+                                Spacer()
+                                if let last = item.last {
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text("\(last.kgString) kg")
+                                            .font(.subheadline.weight(.bold))
+                                            .foregroundStyle(Theme.textPrimary)
+                                        if let best = item.best, let first = item.first {
+                                            let delta = last - first
+                                            Text("max \(best.kgString) · \(delta >= 0 ? "+" : "")\(delta.kgString)")
+                                                .font(.caption2)
+                                                .foregroundStyle(delta >= 0 ? Theme.success : Theme.red)
+                                        }
+                                    }
+                                }
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                            .padding(10)
+                            .background(Theme.surfaceElevated, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .cardStyle()
+    }
+}
+
 // MARK: - Grafico per esercizio
 
 struct ExerciseProgressChart: View {
-    let exercise: Exercise
+    let series: ExerciseSeries
+    let target: Double?
     let metric: ProgressDashboardView.ChartMetric
 
-    private var points: [ProgressPoint] { exercise.progressPoints }
+    private var points: [ProgressPoint] { series.points }
 
     private func value(_ point: ProgressPoint) -> Double {
         metric == .maxWeight ? point.maxWeight : point.volume
@@ -379,7 +530,7 @@ struct ExerciseProgressChart: View {
                         .foregroundStyle(Theme.red)
                     }
 
-                    if metric == .maxWeight, let target = exercise.targetWeight {
+                    if metric == .maxWeight, let target {
                         RuleMark(y: .value("Obiettivo", target))
                             .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
                             .foregroundStyle(Theme.navyLight)
@@ -453,9 +604,10 @@ struct SummaryValue: View {
 
 struct TargetsCard: View {
     let exercises: [Exercise]
+    let history: ExerciseHistory
 
     private var withTarget: [Exercise] {
-        exercises.filter { $0.targetWeight != nil }
+        exercises.filter { $0.targetWeight != nil && !$0.isTimed }
     }
 
     var body: some View {
@@ -470,7 +622,7 @@ struct TargetsCard: View {
             } else {
                 ForEach(withTarget) { exercise in
                     let target = exercise.targetWeight ?? 0
-                    let best = exercise.personalRecord() ?? 0
+                    let best = history.personalRecord(for: exercise) ?? 0
                     let ratio = target > 0 ? min(1, best / target) : 0
 
                     VStack(alignment: .leading, spacing: 6) {

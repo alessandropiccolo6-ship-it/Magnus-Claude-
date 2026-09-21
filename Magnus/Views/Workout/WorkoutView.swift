@@ -110,7 +110,7 @@ struct WorkoutView: View {
             activeSession = open
             return
         }
-        let session = WorkoutSession(date: .now)
+        let session = WorkoutSession(date: .now, dayName: day.name)
         modelContext.insert(session)
         session.day = day
         activeSession = session

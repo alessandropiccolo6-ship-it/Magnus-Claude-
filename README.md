@@ -9,7 +9,18 @@ Palette: nero, azzurro scuro e rosso.
 
 - **Scheda da foto**: scatti o scegli la foto della scheda. Il testo viene letto sul telefono
   (framework Vision, nessun server) e trasformato in giorni ed esercizi con serie × ripetizioni
-  e recupero. Prima di salvare controlli e correggi tutto.
+  e recupero. Funziona con le tabelle tipo ESERCIZIO | SERIE | REC. | KG: i blocchi separati da
+  una riga vuota diventano Giorno A / Giorno B, il recupero scritto una sola volta vale per le
+  righe successive, e le righe a tempo (5 min riscaldamento, 10 min corsa, cyclette) diventano
+  esercizi "a tempo". Prima di salvare controlli e correggi tutto.
+- **Gruppi muscolari**: ogni esercizio viene assegnato automaticamente a un gruppo (Petto,
+  Schiena, Spalle, Bicipiti, Tricipiti, Gambe, Glutei, Addome, Cardio) e puoi cambiarlo. Serve a
+  confrontare schede diverse nel tempo: "Chest press" e "Pectoral machine" finiscono entrambi in
+  Petto.
+- **Storico unico tra le schede**: ogni serie registrata ricorda nome esercizio e gruppo
+  muscolare. Cambiare o eliminare una scheda non cancella nulla; lo stesso esercizio su schede
+  diverse viene unito nello stesso grafico, e i pesi dell'ultima volta vengono ripresi anche se
+  arrivano da una scheda precedente.
 - **Scheda manuale**: in alternativa crei giorni ed esercizi a mano.
 - **Recuperi fissi**: il tempo di recupero scritto sulla scheda resta fisso; durante
   l'allenamento non si modifica e viene usato dal timer di recupero che parte quando spunti
@@ -21,9 +32,12 @@ Palette: nero, azzurro scuro e rosso.
 - **Peso obiettivo**: per ogni esercizio puoi impostare il peso che vuoi raggiungere; lo vedi
   come linea tratteggiata nel grafico e come barra di avanzamento.
 - **Progressi**: allenamenti totali, settimana corrente, serie negli ultimi 30 giorni, settimane
-  consecutive, calendario a "mattonelle" degli ultimi 4 mesi, allenamenti per settimana e grafico
-  per esercizio (peso massimo o volume per allenamento).
-- **Storico**: tutti gli allenamenti terminati, mese per mese, con il dettaglio delle serie.
+  consecutive, calendario a "mattonelle" degli ultimi 4 mesi, allenamenti per settimana, confronto
+  per gruppo muscolare (volume settimanale ed elenco esercizi con ultimo peso, massimo e
+  variazione) e grafico per esercizio (peso massimo o volume per allenamento), unito tra tutte le
+  schede.
+- **Storico**: tutti gli allenamenti terminati, mese per mese, con i gruppi muscolari allenati,
+  filtro per gruppo e dettaglio delle serie.
 
 ## Requisiti
 
@@ -43,7 +57,10 @@ Palette: nero, azzurro scuro e rosso.
 ```
 Magnus/
 ├── MagnusApp.swift            # entry point, container SwiftData
-├── Models/Models.swift        # WorkoutPlan, WorkoutDay, Exercise, WorkoutSession, SetLog
+├── Models/
+│   ├── Models.swift           # WorkoutPlan, WorkoutDay, Exercise, WorkoutSession, SetLog
+│   ├── MuscleGroup.swift      # gruppi muscolari e classificazione automatica dal nome
+│   └── ExerciseHistory.swift  # storico unito per nome esercizio e gruppo, serie per i grafici
 ├── Theme/Theme.swift          # palette e stili riutilizzabili
 ├── Services/
 │   ├── PlanOCRService.swift   # lettura foto (Vision) + parsing di esercizi/serie/recuperi
@@ -61,6 +78,8 @@ Magnus/
 
 - Serie × ripetizioni: `4x10`, `4 x 8-12`, `3×12`, `4 serie da 10`
 - Recupero: `90''`, `90"`, `1'30`, `2'`, `2 min`, `rec 90`, `recupero: 1'30`
-- Giorni: `Giorno A`, `Day 1`, `Scheda B`, `Lunedì`, `Push` / `Pull` / `Legs`
+- Righe a tempo: `5 min riscaldamento`, `10 min corsa`, `Cyclette 10 min`
+- Giorni: `Giorno A`, `Day 1`, `Scheda B`, `Lunedì`, `Push` / `Pull` / `Legs`, oppure blocchi
+  separati da una riga vuota (o da una nuova riga di riscaldamento)
 
 Tutto ciò che non viene riconosciuto si corregge nella schermata di controllo prima del salvataggio.
